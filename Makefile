@@ -1,6 +1,6 @@
 CC=gcc
 LDFLAGS=-lml -lcvaux -lhighgui -lcv -lcxcore
-CFLAGS=-I/usr/include/opencv
+CFLAGS=-ggdb -I/usr/include/opencv
 
 
 all: build

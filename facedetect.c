@@ -32,7 +32,7 @@ const char* cascade_name =
 void cvShowManyImages(char* title, int nArgs, ...) {
 
     // img - Used for getting the arguments 
-    IplImage *img;
+    IplImage *img, *tmp;
 
     // DispImage - the image in which input images are to be copied
     IplImage *DispImage;
@@ -90,6 +90,7 @@ void cvShowManyImages(char* title, int nArgs, ...) {
 
     // Create a new 3 channel image
     DispImage = cvCreateImage( cvSize(100 + size*w, 60 + size*h), 8, 3 );
+    cvZero(DispImage);
 
     // Used to get the arguments passed
     va_list args;
@@ -128,19 +129,26 @@ void cvShowManyImages(char* title, int nArgs, ...) {
         // Set the image ROI to display the current image
         cvSetImageROI(DispImage, cvRect(m, n, (int)( x/scale ), (int)( y/scale )));
 
-        // Resize the input image and copy the it to the Single Big Image
-        cvResize(img, DispImage, CV_INTER_LINEAR);
 
+	if (img->nChannels == 1) {
+		tmp = cvCreateImage(cvSize(x, y), 8, 3);
+		cvCvtColor(img, tmp, CV_GRAY2RGB);
+		cvResize(tmp, DispImage, CV_INTER_LINEAR);
+		cvReleaseImage(&tmp);
+	} else {
+        	// Resize the input image and copy the it to the Single Big Image
+        	cvResize(img, DispImage, CV_INTER_LINEAR);
+	}
         // Reset the ROI in order to display the next image
         cvResetImageROI(DispImage);
     }
 
     // Create a new window, and show the Single Big Image
-    cvNamedWindow( title, 1 );
+    //cvNamedWindow( title, 1 );
     cvShowImage( title, DispImage);
 
-    cvWaitKey(0);
-    cvDestroyWindow(title);
+    //cvWaitKey(0);
+    //cvDestroyWindow(title);
 
     // End the number of arguments
     va_end(args);
@@ -152,11 +160,11 @@ void cvShowManyImages(char* title, int nArgs, ...) {
 // Main function, defines the entry point for the program.
 int main( int argc, char** argv )
 {
-
+    int scale = 2;
     // Structure for getting video from camera or avi
     CvCapture* capture = 0;
     // Images to capture the frame from video or camera or from file
-    IplImage *frame, *frame_copy = 0;
+    IplImage *frame = 0, *frame_copy = 0;
     // Used for calculations
     int optlen = strlen("--cascade=");
     // Input file name for avi or image file.
@@ -190,19 +198,17 @@ int main( int argc, char** argv )
     // Find whether to detect the object from file or from camera.
     if( !input_name || (isdigit(input_name[0]) && input_name[1] == '\0') ){
         capture = cvCaptureFromCAM( !input_name ? 0 : input_name[0] - '0' );
-    	//cvSetCaptureProperty(capture, CV_CAP_PROP_FRAME_WIDTH, 320);
-	//cvSetCaptureProperty(capture, CV_CAP_PROP_FRAME_HEIGHT, 240);
     } else
         capture = cvCaptureFromAVI( input_name ); 
 
     // Create a new named window with title: result
     cvNamedWindow( "result", 1 );
-
     // Find if the capture is loaded successfully or not.
 
     // If loaded succesfully, then:
     if( capture )
     {
+ 
         // Capture from the camera.
         for(;;)
         {
@@ -214,22 +220,17 @@ int main( int argc, char** argv )
             // If the frame does not exist, quit the loop
             if( !frame )
                 break;
-            
-            // Allocate framecopy as the same size of the frame
-            if( !frame_copy )
-                frame_copy = cvCreateImage( cvSize(frame->width,frame->height),
-                                            IPL_DEPTH_8U, frame->nChannels );
 
-            // Check the origin of image. If top left, copy the image frame to frame_copy. 
-            if( frame->origin == IPL_ORIGIN_TL )
-                cvCopy( frame, frame_copy, 0 );
-            // Else flip and copy the image
-            else
-                cvFlip( frame, frame_copy, 0 );
-            
+            if (!frame_copy) {
+             	   printf("Allocate image\n");
+		   frame_copy = cvCreateImage(cvSize(frame->width/2,frame->height/2),
+                                   8, 3);
+	    }
+            cvResize(frame, frame_copy, CV_INTER_LINEAR);
+
             // Call the function to detect and draw the face
             detect_and_draw( frame_copy );
-
+	    //cvShowImage("result", frame_copy);
             // Wait for a while before proceeding to the next frame
             if( cvWaitKey( 10 ) >= 0 )
                 break;
@@ -237,6 +238,7 @@ int main( int argc, char** argv )
 
         // Release the images, and capture memory
         cvReleaseImage( &frame_copy );
+	//cvReleaseImage( &frame_resized );
         cvReleaseCapture( &capture );
     }
 
@@ -309,13 +311,19 @@ int main( int argc, char** argv )
 }
 
 // Function to detect and draw any faces that is present in an image
-void detect_and_draw( IplImage* img )
+void detect_and_draw( IplImage* temp )
 {
-    int scale = 1;
+//    int scale = 2;
 
     // Create a new image based on the input image
-    IplImage* temp = cvCreateImage( cvSize(img->width/scale,img->height/scale), 8, 3 );
-
+//    IplImage* temp = cvCreateImage( cvSize(img->width/scale,img->height/scale), 8, 3 );
+//    cvResize(img, temp, CV_INTER_LINEAR);
+    IplImage *grey = cvCreateImage(cvGetSize(temp), 8, 1);
+    cvCvtColor(temp, grey, CV_RGB2GRAY);
+    IplImage* face = cvCreateImage(cvSize(40,40), 8, 1);
+    IplImage* face_hist = cvCreateImage(cvSize(40,40), 8, 1);
+    cvZero(face);
+    cvZero(face_hist);
     // Create two points to represent the face locations
     CvPoint pt1, pt2;
     int i;
@@ -329,7 +337,7 @@ void detect_and_draw( IplImage* img )
 
         // There can be more than one face in an image. So create a growable sequence of faces.
         // Detect the objects and store them in the sequence
-        CvSeq* faces = cvHaarDetectObjects( img, cascade, storage,
+        CvSeq* faces = cvHaarDetectObjects( grey, cascade, storage,
                                             1.1, 2, CV_HAAR_DO_CANNY_PRUNING,
                                             cvSize(40, 40) );
 
@@ -340,20 +348,26 @@ void detect_and_draw( IplImage* img )
             CvRect* r = (CvRect*)cvGetSeqElem( faces, i );
 
             // Find the dimensions of the face,and scale it if necessary
-            pt1.x = r->x*scale;
-            pt2.x = (r->x+r->width)*scale;
-            pt1.y = r->y*scale;
-            pt2.y = (r->y+r->height)*scale;
+            pt1.x = r->x;
+            pt2.x = (r->x+r->width);
+            pt1.y = r->y;
+            pt2.y = (r->y+r->height);
 
+            cvSetImageROI(grey, cvRect(pt1.x, pt1.y, r->width, r->height));
+            cvResize(grey, face, CV_INTER_LINEAR);
+            cvResetImageROI(grey);
+	    cvEqualizeHist(face,face_hist);
             // Draw the rectangle in the input image
-            cvRectangle( img, pt1, pt2, CV_RGB(255,0,0), 3, 8, 0 );
+            cvRectangle( grey, pt1, pt2, CV_RGB(255,0,0), 3, 8, 0 );
         }
     }
 
     // Show the image in the window named "result"
-    cvShowImage( "result", img );
+    //cvShowImage( "result", temp );
+    cvShowManyImages("result", 6, temp, grey, face, face_hist, temp, temp);
 
     // Release the temp image created.
-    cvReleaseImage( &temp );
+    cvReleaseImage( &face );
+    cvReleaseImage( &grey );
 }
 
