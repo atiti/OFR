@@ -2,6 +2,7 @@
 
 // Include header files
 #include <opencv/cv.h>
+#include <opencv/cvaux.h>
 #include <opencv/highgui.h>
 
 #include <stdio.h>
@@ -21,6 +22,26 @@ static CvMemStorage* storage = 0;
 // Create a new Haar classifier
 static CvHaarClassifierCascade* cascade = 0;
 static CvHaarClassifierCascade* cascade_eyes = 0;
+
+int still = 1;
+IplImage **faceImgArr = 0;
+CvMat *personNumTruthMat = 0;
+int nTrainFaces = 0;
+int nEigens = 0;
+IplImage *pAvgTrainImg = 0;
+IplImage **eigenVectArr = 0;
+CvMat *eigenValMat = 0;
+CvMat *projectedTrainFaceMat = 0;
+
+void learn_eigenfaces();
+void recognize_eigenfaces();
+void doPCA();
+void storeTrainingData_eigenfaces();
+int loadTrainingData_eigenfaces(CvMat **pTrainPersonNumMat);
+int findNearestNeighbor_eigenfaces(float *projectedTestFace);
+int loadFaceImgArray(char *filename);
+
+
 
 // Function prototype for detecting and drawing an object from an image
 void detect_and_draw( IplImage* image );
@@ -151,7 +172,8 @@ void cvShowManyImages(char* title, int nArgs, ...) {
     //cvNamedWindow( title, 1 );
     cvShowImage( title, DispImage);
 
-    //cvWaitKey(0);
+    if (still)
+    	cvWaitKey(0);
     //cvDestroyWindow(title);
 
     // End the number of arguments
@@ -159,6 +181,159 @@ void cvShowManyImages(char* title, int nArgs, ...) {
 
     // Release the Image Memory
     cvReleaseImage(&DispImage);
+}
+
+int loadFaceImgArray(char *fname) {
+	FILE *imgListFile = 0;
+	char imgFilename[512];
+	int iFace, nFaces=0;
+	imgListFile = fopen(fname, "r");
+	while (fgets(imgFilename, 512, imgListFile) ) ++nFaces;
+	rewind(imgListFile);
+
+	faceImgArr = (IplImage **)cvAlloc(nFaces*sizeof(IplImage *));
+	personNumTruthMat = cvCreateMat(1, nFaces, CV_32SC1);
+	
+	for(iFace=0;iFace<nFaces;iFace++) {
+		fscanf(imgListFile, "%d %s", personNumTruthMat->data.i+iFace, imgFilename);
+		faceImgArr[iFace] = cvLoadImage(imgFilename, CV_LOAD_IMAGE_GRAYSCALE);
+	}
+	fclose(imgListFile);
+	return nFaces;
+}
+
+void doPCA() {
+	int i;
+	CvTermCriteria calcLimit;
+	CvSize faceImgSize;
+	nEigens = nTrainFaces-1;
+	
+	faceImgSize.width = faceImgArr[0]->width;
+	faceImgSize.height = faceImgArr[0]->height;
+	eigenVectArr = (IplImage**)cvAlloc(sizeof(IplImage*) * nEigens);
+	for(i=0;i<nEigens;i++)
+		eigenVectArr[i] = cvCreateImage(faceImgSize, IPL_DEPTH_32F, 1);
+	// alloc eigenvalue array
+	eigenValMat = cvCreateMat(1, nEigens, CV_32FC1);
+	// alloc average image
+	pAvgTrainImg = cvCreateImage(faceImgSize, IPL_DEPTH_32F, 1);
+	// set pca termination condition
+	calcLimit = cvTermCriteria(CV_TERMCRIT_ITER, nEigens, 1);
+
+	// compute avg image, eigenvalues and vectors
+	cvCalcEigenObjects(nTrainFaces, (void*)faceImgArr, (void*)eigenVectArr,
+			   CV_EIGOBJ_NO_CALLBACK, 0, 0, &calcLimit,
+			   pAvgTrainImg, eigenValMat->data.fl);
+}
+
+void storeTrainingData_eigenfaces() {
+	CvFileStorage *fileStorage;
+	int i;
+	fileStorage = cvOpenFileStorage("facedata.xml", 0, CV_STORAGE_WRITE);
+
+	cvWriteInt(fileStorage, "nEigens", nEigens);
+	cvWriteInt(fileStorage, "nTrainFaces", nTrainFaces);
+	cvWrite(fileStorage, "trainPersonNumMat", personNumTruthMat, cvAttrList(0,0));
+	cvWrite(fileStorage, "eigenValMat", eigenValMat, cvAttrList(0,0));
+	cvWrite(fileStorage, "projectedTrainFaceMat", projectedTrainFaceMat, cvAttrList(0,0));
+	cvWrite(fileStorage, "avgTrainImg", pAvgTrainImg, cvAttrList(0,0));
+	for(i=0;i<nEigens;i++) {
+		char varname[200];
+		sprintf(varname, "eigenVect_%d", i);
+		cvWrite(fileStorage, varname, eigenVectArr[i],cvAttrList(0,0));
+	}
+	cvReleaseFileStorage(&fileStorage);
+}
+	
+void learn_eigenfaces() {
+	int i, offset;
+	nTrainFaces = loadFaceImgArray("train_eigen.txt");
+	if (nTrainFaces < 2) {
+		fprintf(stderr, "Need more than 2 faces to train\n");
+		return;
+	}
+
+	doPCA();
+	
+	projectedTrainFaceMat = cvCreateMat(nTrainFaces, nEigens, CV_32FC1);
+	offset = projectedTrainFaceMat->step / sizeof(float);
+	for(i=0;i<nTrainFaces;i++) {
+		cvEigenDecomposite(faceImgArr[i], nEigens, eigenVectArr, 0, 0,
+				   pAvgTrainImg, projectedTrainFaceMat->data.fl + i*nEigens);
+
+	}
+	storeTrainingData_eigenfaces();
+}
+
+int loadTrainingData_eigenfaces(CvMat **pTrainPersonNumMat) {
+	CvFileStorage *fileStorage;
+	int i;
+	fileStorage = cvOpenFileStorage("facedata.xml", 0, CV_STORAGE_READ);
+	if (!fileStorage) {
+		fprintf(stderr, "Can't open facedata.xml\n");
+		return 0;
+	}
+	
+	nEigens = cvReadIntByName(fileStorage, 0, "nEigens", 0);
+	nTrainFaces = cvReadIntByName(fileStorage, 0, "nTrainFaces", 0);
+	*pTrainPersonNumMat = (CvMat *)cvReadByName(fileStorage, 0, "trainPersonNumMat", 0);
+	eigenValMat = (CvMat *)cvReadByName(fileStorage, 0, "eigenValMat", 0);
+	projectedTrainFaceMat = (CvMat *)cvReadByName(fileStorage, 0, "projectedTrainFaceMat", 0);
+	pAvgTrainImg = (IplImage *)cvReadByName(fileStorage, 0, "avgTrainImg", 0);
+	eigenVectArr = (IplImage **)cvAlloc(nTrainFaces*sizeof(IplImage *));
+	for(i=0;i<nEigens;i++) {
+		char varname[200];
+		sprintf(varname, "eigenVect_%d", i);
+		eigenVectArr[i] = (IplImage *)cvReadByName(fileStorage, 0, varname, 0);
+	}
+	cvReleaseFileStorage(&fileStorage);
+	return 1;
+}
+
+int findNearestNeighbor_eigenfaces(float *projectedTestFace) {
+	double leastDistSq = DBL_MAX;
+	int i, iTrain, iNearest = 0;
+	for(iTrain=0;iTrain<nTrainFaces;iTrain++) {
+		double distSq = 0;
+		for(i=0;i<nEigens;i++) {
+			float d_i = projectedTestFace[i] - projectedTrainFaceMat->data.fl[iTrain*nEigens + i];
+			distSq += d_i*d_i;
+		}
+
+		if (distSq < leastDistSq) {
+			leastDistSq = distSq;
+			iNearest = iTrain;
+		}
+	}
+	return iNearest;
+}
+
+void recognize_eigenfaces() {
+	int i, nTestFaces = 0;
+	CvMat *trainPersonNumMat = 0;
+	float *projectedTestFace = 0;
+
+	nTestFaces = loadFaceImgArray("test.txt");
+	printf("%d test faces loaded\n", nTestFaces);
+	if (!loadTrainingData_eigenfaces(&trainPersonNumMat)) return;
+
+	projectedTestFace = (float *)cvAlloc(nEigens*sizeof(float));
+	for(i=0;i<nTestFaces;i++) {
+		int iNearest, nearest, truth;
+		cvEigenDecomposite(faceImgArr[i], nEigens, eigenVectArr,
+				   0, 0, pAvgTrainImg, projectedTestFace);
+
+		iNearest = findNearestNeighbor_eigenfaces(projectedTestFace);
+		truth = personNumTruthMat->data.i[i];
+		nearest = trainPersonNumMat->data.i[iNearest];
+
+		printf("nearest = %d, truth = %d\n", nearest, truth);
+	}
+}
+
+void process_image(IplImage *img) {
+	detect_and_draw(img);
+
 }
 
 // Main function, defines the entry point for the program.
@@ -173,14 +348,19 @@ int main( int argc, char** argv )
     int optlen = strlen("--cascade=");
     // Input file name for avi or image file.
     const char* input_name;
+
     // Check for the correct usage of the command line
     if( argc > 1 && strncmp( argv[1], "--cascade=", optlen ) == 0 )
     {
         cascade_name = argv[1] + optlen;
         input_name = argc > 2 ? argv[2] : 0;
-    }
-    else
-    {
+    } else if (strncmp(argv[1], "train", 5) == 0) {
+	learn_eigenfaces();
+	exit(0);
+    } else if (strncmp(argv[1], "test", 4) == 0) {
+	recognize_eigenfaces();
+	exit(0);
+    } else {
         fprintf( stderr,
         "Usage: facedetect --cascade=\"<cascade_path>\" [filename|camera_index]\n" );
         return -1;
@@ -203,11 +383,14 @@ int main( int argc, char** argv )
 	return -1;
     }
  
+    char *ext = strrchr(input_name, '.');
     // Allocate the memory storage
     storage = cvCreateMemStorage(0);
     // Find whether to detect the object from file or from camera.
     if( !input_name || (isdigit(input_name[0]) && input_name[1] == '\0') ){
         capture = cvCaptureFromCAM( !input_name ? 0 : input_name[0] - '0' );
+    } else if (ext && strncmp(ext, ".txt", 4) == 0) {
+	capture = NULL;
     } else
         capture = cvCaptureFromAVI( input_name ); 
 
@@ -240,7 +423,8 @@ int main( int argc, char** argv )
  	    //cvCopy(frame, frame_copy,0);
 
             // Call the function to detect and draw the face
-            detect_and_draw( frame_copy );
+            //detect_and_draw( frame_copy );
+	    process_image(frame_copy);
 	    //cvShowImage("result", frame_copy);
             // Wait for a while before proceeding to the next frame
             cvWaitKey(1);
@@ -257,18 +441,22 @@ int main( int argc, char** argv )
     // If the capture is not loaded succesfully, then:
     else
     {
+	still = 1;
         // Assume the image to be lena.jpg, or the input_name specified
         const char* filename = input_name ? input_name : (char*)"lena.jpg";
 
+	IplImage* image = NULL;
+	printf("%s\n", filename);
+	if (strncmp(strrchr(filename, '.')+1, "txt", 3) != 0) {
         // Load the image from that filename
-        IplImage* image = cvLoadImage( filename, 1 );
+            image = cvLoadImage( filename, 1 );
 
         // If Image is loaded succesfully, then:
-        if( image )
-        {
+        //if( image )
+        //{
             // Detect and draw the face
-            detect_and_draw( image );
-
+            //detect_and_draw( image );
+	    process_image(image);
             // Wait for user input
             cvWaitKey(0);
 
@@ -277,6 +465,7 @@ int main( int argc, char** argv )
         }
         else
         {
+	    printf("Not an image\n");
             /* assume it is a text file containing the
                list of the image filenames to be processed - one per line */
             FILE* f = fopen( filename, "rt" );
@@ -301,8 +490,8 @@ int main( int argc, char** argv )
                     if( image )
                     {
                         // Detect and draw the face from the image
-                        detect_and_draw( image );
-                        
+                        //detect_and_draw( image );
+                        process_image(image);
                         // Wait for the user input, and release the memory
                         cvWaitKey(0);
                         cvReleaseImage( &image );
